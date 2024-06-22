@@ -41,6 +41,15 @@ void initialise_command(uint8_t idx) {
    }
 }
 
+//---------------------------------------------------------
+// This will be shared with code running on the other core
+static uint8_t display_array[2][4] = {
+   {0x00, 0x00, 0x00, 0x00},
+   {0x00, 0x00, 0x00, 0x00},
+};
+static uint8_t display_last_written = 0;
+//---------------------------------------------------------
+
 void handle_clk_rise() {
    if (cpidx >=100) return;
    CmdParamSet *cp = &cmdparam[cpidx];
@@ -54,49 +63,6 @@ void handle_clk_rise() {
       cp->wire_params_idx++;
    }
 }
-void display_cmd_and_params() {
-   char cmd_str[32];
-   uint8_t cmd_int;
-
-   for (int i=0; i<100; i++) {
-      if (cmdparam[i].cmd_idx == 8) {
-         cmd_int = cmdparam[i].command & 0xC0;
-         switch(cmd_int) {
-            case 0x00:
-               uint8_t cmd_param = cmdparam[i].command & 0x03;
-               if (cmd_param == 2) {
-                  sprintf(cmd_str, "D Mode, 6/12: %x", cmdparam[i].command);
-               } else if (cmd_param == 3) {
-                  sprintf(cmd_str, "D Mode, 7/11: %x", cmdparam[i].command);
-               } else {
-                  sprintf(cmd_str, "D Mode, invalid value: %x", cmdparam[i].command);
-               }
-               break;
-            case 0x40:
-               cmd_param = cmdparam[i].command & 0x03;
-               if (cmd_param == 0) {
-                  strcpy(cmd_str, "Data Mode, Write");
-               } else if (cmd_param == 2) {
-                  sprintf(cmd_str, "Data Mode, Read Keys: %x", cmdparam[i].command);
-               } else {
-                  sprintf(cmd_str, "Data Mode, Invalid value %x", cmdparam[i].command);
-               }
-               break;
-            case 0x80:
-               sprintf(cmd_str, "Display Control: %x", cmdparam[i].command);
-               break;
-            case 0xC0:
-               cmd_param = cmdparam[i].command & 0x0F;  
-               sprintf(cmd_str, "Display Address %x", cmd_param);
-               break;
-         }
-         mp_printf(MP_PYTHON_PRINTER, "%s\n", cmd_str);
-      }
-      else {
-         mp_printf(MP_PYTHON_PRINTER, "Not enough bits in command: %d\n", cmdparam[i].cmd_idx);
-      }
-   }
-}
 
 static int debounce_max = 2;
 void cooker_handler() {
@@ -106,6 +72,8 @@ void cooker_handler() {
    bool edge_rise = 0;
    bool edge_fall = 0;
    int debounce_count = 0;
+   uint8_t display_info_now[4];
+   uint8_t display_write_idx;
 
    initialise_display_data();
    for (int i=0; i<100; i++) {
@@ -120,11 +88,23 @@ void cooker_handler() {
                debounce_count = 0;
 
                // STB has definitely gone high, handle the command and clear out data structures here
-               //initialise_command();
-               cpidx++;
-               if (cpidx == 100) {
-                  display_cmd_and_params();
+               if (cmdparam[cpidx].command == 0xC0) {
+                  display_info_now[0] = cmdparam[cpidx].wire_params[0];
+                  display_info_now[1] = cmdparam[cpidx].wire_params[2];
+                  display_info_now[2] = cmdparam[cpidx].wire_params[4];
+                  display_info_now[3] = cmdparam[cpidx].wire_params[9];
+
+                  display_write_idx = display_last_written ^ 0x01; // toggle it
+                  memcpy(display_array[display_write_idx], display_info_now, 4);
+                  display_last_written = display_last_written ^ 0x01;
+                  //mp_printf(MP_PYTHON_PRINTER, "===>%02x %02x %02x %02x\n", display_info_now[0], display_info_now[1], display_info_now[2], display_info_now[3]);
                }
+               cpidx = (cpidx+1)%100;
+               cmdparam[cpidx].cmd_idx = 0;
+               cmdparam[cpidx].wire_params_idx = 0;
+               //if (cpidx == 99) {
+               //   display_cmd_and_params();
+               //}
             }
             else {
                // STB has gone high, but could be just noise, let's wait and see...
@@ -183,6 +163,18 @@ static mp_obj_t example_print_intr(mp_obj_t idx_obj) {
 // Define a Python reference to the function above.
 static MP_DEFINE_CONST_FUN_OBJ_1(example_print_intr_obj, example_print_intr);
 
+static mp_obj_t example_print_power_level() {
+    mp_obj_t tuple[4] = {
+       tuple[0] = mp_obj_new_int(display_array[display_last_written][0]),
+       tuple[1] = mp_obj_new_int(display_array[display_last_written][1]),
+       tuple[2] = mp_obj_new_int(display_array[display_last_written][2]),
+       tuple[3] = mp_obj_new_int(display_array[display_last_written][3]),
+    };
+    return mp_obj_new_tuple(4, tuple);
+} 
+
+// Define a Python reference to the function above.
+static MP_DEFINE_CONST_FUN_OBJ_0(example_print_power_level_obj, example_print_power_level);
 //------------------------------------------------------------
 
 // Define all attributes of the module.
@@ -193,6 +185,7 @@ static MP_DEFINE_CONST_FUN_OBJ_1(example_print_intr_obj, example_print_intr);
 static const mp_rom_map_elem_t example_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_cexample) },
     { MP_ROM_QSTR(MP_QSTR_print_intr), MP_ROM_PTR(&example_print_intr_obj) },
+    { MP_ROM_QSTR(MP_QSTR_print_power_level), MP_ROM_PTR(&example_print_power_level_obj) },
 };
 static MP_DEFINE_CONST_DICT(example_module_globals, example_module_globals_table);
 
@@ -204,3 +197,63 @@ const mp_obj_module_t example_user_cmodule = {
 
 // Register the module to make it available in Python.
 MP_REGISTER_MODULE(MP_QSTR_cexample, example_user_cmodule);
+
+
+void display_cmd_and_params() {
+   char cmd_str[32];
+   uint8_t cmd_int;
+
+   for (int i=0; i<100; i++) {
+      if (cmdparam[i].cmd_idx == 8) {
+         cmd_int = cmdparam[i].command & 0xC0;
+         switch(cmd_int) {
+            case 0x00:
+               uint8_t cmd_param = cmdparam[i].command & 0x03;
+               if (cmd_param == 2) {
+                  sprintf(cmd_str, "D Mode, 6/12: %02x", cmdparam[i].command);
+               } else if (cmd_param == 3) {
+                  sprintf(cmd_str, "D Mode, 7/11: %02x", cmdparam[i].command);
+               } else {
+                  sprintf(cmd_str, "D Mode, invalid value: %x", cmdparam[i].command);
+               }
+               mp_printf(MP_PYTHON_PRINTER, "%s\n", cmd_str);
+               break;
+            case 0x40:
+               cmd_param = cmdparam[i].command & 0x03;
+               if (cmd_param == 0) {
+                  strcpy(cmd_str, "Data Mode, Write");
+               } else if (cmd_param == 2) {
+                  sprintf(cmd_str, "Data Mode, Read Keys: %02x", cmdparam[i].command);
+               } else {
+                  sprintf(cmd_str, "Data Mode, Invalid value %02x", cmdparam[i].command);
+               }
+               if (cmdparam[i].wire_params[0] == 0) continue; // no keys pressed, so nothing interesting
+               mp_printf(MP_PYTHON_PRINTER, "%s", cmd_str);
+               break;
+            case 0x80:
+               sprintf(cmd_str, "Display Control: %02x", cmdparam[i].command);
+               mp_printf(MP_PYTHON_PRINTER, "%s\n", cmd_str);
+               break;
+            case 0xC0:
+               cmd_param = cmdparam[i].command & 0x0F;  
+               sprintf(cmd_str, "Display Address %02x", cmd_param);
+               mp_printf(MP_PYTHON_PRINTER, "%s\n", cmd_str);
+               break;
+         }
+         int j=0;
+         int num_params = cmdparam[i].wire_params_idx;
+         if (num_params > 0) {
+            mp_printf(MP_PYTHON_PRINTER, "====> ");
+         }
+         for (j=0; j<num_params; j=j+8) {
+            mp_printf(MP_PYTHON_PRINTER, "%02x ", cmdparam[i].wire_params[j/8]);
+         }
+         if (j>0){
+            mp_printf(MP_PYTHON_PRINTER, "\n");
+         }
+      }
+      else {
+         mp_printf(MP_PYTHON_PRINTER, "Not enough bits in command: %d\n", cmdparam[i].cmd_idx);
+      }
+   }
+}
